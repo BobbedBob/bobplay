@@ -1437,9 +1437,12 @@ async def stop(interaction: discord.Interaction):
 
         bot.loop.create_task(update_controller(bot, interaction.guild.id))
 
-        # Final cleanup of the bot's state
+        # Final cleanup of the bot's state.
+        # /stop is an explicit request to leave, so it also disables 24/7 mode
+        # (otherwise the bot would immediately reconnect).
+        state._24_7_mode = False
         clear_audio_cache(guild_id)
-        get_guild_state(guild_id).music_player = MusicPlayer()
+        get_guild_state(guild_id).reset_player()
 
         embed = Embed(
             description=get_messages("stop", guild_id),
@@ -1782,6 +1785,25 @@ async def radio_24_7(interaction: discord.Interaction, mode: str):
         music_player.loop_current = False
         music_player.radio_playlist.clear()
 
+        # If the bot was idling with the keep-alive silence loop, stop it.
+        if music_player.silence_task and not music_player.silence_task.done():
+            music_player.silence_task.cancel()
+
+        # Without 24/7, the bot has no reason to stay in an empty channel.
+        # Note: the keep-alive silence loop counts as "playing", hence the extra check.
+        vc = music_player.voice_client
+        is_really_playing = (
+            vc.is_playing() or vc.is_paused()
+        ) and not music_player.is_playing_silence if vc else False
+        if (
+            vc
+            and vc.is_connected()
+            and not is_really_playing
+            and not [m for m in vc.channel.members if not m.bot]
+        ):
+            await safe_stop(vc)
+            await vc.disconnect()
+
         embed = Embed(
             title=get_messages("24_7.off_title", guild_id),
             description=get_messages("24_7.off_desc", guild_id),
@@ -1819,12 +1841,9 @@ async def radio_24_7(interaction: discord.Interaction, mode: str):
         music_player.radio_playlist.extend(queue_snapshot)
 
     if not music_player.radio_playlist and mode == "normal":
-        await interaction.followup.send(
-            get_messages("24_7.error.empty_queue_normal", guild_id),
-            silent=SILENT_MESSAGES,
-            ephemeral=True,
+        logger.info(
+            f"[{guild_id}] 24/7 normal mode enabled with an empty queue. The bot will idle in the channel."
         )
-        return
 
     get_guild_state(guild_id)._24_7_mode = True
     music_player.loop_current = False
@@ -1838,15 +1857,31 @@ async def radio_24_7(interaction: discord.Interaction, mode: str):
         )
     else:  # mode == "normal"
         music_player.autoplay_enabled = False
-        embed = Embed(
-            title=get_messages("24_7.normal_title", guild_id),
-            description=get_messages("24_7.normal_desc", guild_id),
-            color=0xB5EAD7 if is_kawaii else discord.Color.green(),
-        )
+        if music_player.radio_playlist:
+            embed = Embed(
+                title=get_messages("24_7.normal_title", guild_id),
+                description=get_messages("24_7.normal_desc", guild_id),
+                color=0xB5EAD7 if is_kawaii else discord.Color.green(),
+            )
+        else:
+            # Empty queue: the bot will simply stay connected and wait for songs.
+            embed = Embed(
+                title=get_messages("24_7.normal_title", guild_id),
+                description=get_messages("24_7.idle_desc", guild_id),
+                color=0xB5EAD7 if is_kawaii else discord.Color.green(),
+            )
 
+    # Only start playback if there is actually something to play (or a seed for autoplay).
+    # Otherwise the bot simply idles in the channel until someone adds a song.
+    has_something_to_play = (
+        not music_player.queue.empty()
+        or bool(music_player.radio_playlist)
+        or (mode == "auto" and bool(music_player.history))
+    )
     if (
         not music_player.voice_client.is_playing()
         and not music_player.voice_client.is_paused()
+        and has_something_to_play
     ):
         music_player.current_task = asyncio.create_task(play_audio(guild_id))
 
@@ -2211,6 +2246,64 @@ async def volume(
 
     await interaction.response.send_message(embed=embed, silent=SILENT_MESSAGES)
     bot.loop.create_task(update_controller(bot, interaction.guild.id))
+
+
+@bot.tree.command(
+    name="defaultvolume",
+    description="Sets the default volume used when the bot joins a channel (0-200%).",
+)
+@app_commands.describe(
+    level="The default volume level as a percentage (e.g., 50, 100, 150)."
+)
+@app_commands.default_permissions(manage_channels=True)
+async def default_volume(
+    interaction: discord.Interaction, level: app_commands.Range[int, 0, 200]
+):
+    """
+    Persists a per-server default volume. Every new playback session
+    (bot joining a channel / player reset) starts at this level.
+    """
+    if not interaction.guild:
+        await interaction.response.send_message(
+            get_messages("command.error.guild_only", interaction.guild_id),
+            ephemeral=True,
+            silent=SILENT_MESSAGES,
+        )
+        return
+
+    guild_id = interaction.guild.id
+    state = get_guild_state(guild_id)
+    music_player = state.music_player
+    vc = interaction.guild.voice_client
+
+    new_volume = level / 100.0
+    state.default_volume = new_volume
+
+    # Also apply it right away as the current volume so the change is audible immediately.
+    music_player.volume = new_volume
+    if vc and vc.is_playing() and isinstance(vc.source, discord.PCMVolumeTransformer):
+        vc.source.volume = new_volume
+
+    embed = Embed(
+        description=get_messages("default_volume_success", guild_id, level=level),
+        color=(
+            0xB5EAD7
+            if (get_guild_state(guild_id).locale == Locale.EN_X_KAWAII)
+            else discord.Color.green()
+        ),
+    )
+
+    await interaction.response.send_message(embed=embed, silent=SILENT_MESSAGES)
+    bot.loop.create_task(update_controller(bot, interaction.guild.id))
+
+    # Persist immediately so the setting survives an unexpected shutdown.
+    async def persist_default_volume():
+        try:
+            await save_all_states()
+        except Exception as e:
+            logger.error(f"[{guild_id}] Failed to persist default volume: {e}")
+
+    bot.loop.create_task(persist_default_volume())
 
 
 @bot.tree.command(

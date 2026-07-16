@@ -357,6 +357,22 @@ async def ensure_voice_connection(
             except Exception as e:
                 logger.error(f"[{guild_id}] Unexpected error while promoting: {e}")
 
+    # If the 24/7 keep-alive silence loop is running, stop it now: a user is
+    # interacting with the bot, and the silence source would otherwise make
+    # vc.is_playing() return True and block real playback from starting.
+    if music_player.is_playing_silence or (
+        music_player.silence_task and not music_player.silence_task.done()
+    ):
+        logger.info(
+            f"[{guild_id}] User interaction detected. Stopping the 24/7 keep-alive silence loop."
+        )
+        if music_player.silence_task and not music_player.silence_task.done():
+            music_player.silence_task.cancel()
+        if vc.is_playing():
+            await safe_stop(vc)
+        music_player.is_playing_silence = False
+        await asyncio.sleep(0.1)
+
     # Auto-setup the controller channel on first use if not already set.
     if not get_guild_state(guild_id).controller_channel_id:
         get_guild_state(guild_id).controller_channel_id = interaction.channel.id

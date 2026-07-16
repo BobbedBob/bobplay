@@ -85,7 +85,7 @@ async def handle_playback_error(guild_id: int, error: Exception, query_url: str 
 
     if music_player.voice_client:
         await music_player.voice_client.disconnect()
-        get_guild_state(guild_id).music_player = MusicPlayer()
+        get_guild_state(guild_id).reset_player()
         logger.info(
             f"Player for guild {guild_id} has been reset and disconnected due to a critical error."
         )
@@ -105,6 +105,7 @@ async def play_audio(guild_id, seek_time=0, is_a_loop=False, song_that_just_ende
     if (
         music_player.voice_client
         and music_player.voice_client.is_playing()
+        and not music_player.is_playing_silence
         and not is_a_loop
         and not seek_time > 0
     ):

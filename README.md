@@ -118,7 +118,8 @@ Playify natively supports Linux with an automated setup script.
 | `/queue` | Show the queue with interactive pages. |
 | `/lyrics` | Fetch and display lyrics for the current song. |
 | `/karaoke` | Start a karaoke session with synced lyrics. |
-| `/24_7 <mode>` | Keep the bot in the channel (`normal`, `auto`, `off`). |
+| `/24_7 <mode>` | Keep the bot in the channel 24/7, even when idle (`normal`, `auto`, `off`). |
+| `/defaultvolume <level>` | Set the volume the bot starts at when it joins (saved per server). |
 | `/reconnect` | Refresh the voice connection without losing your place. |
 
 *(And many more...)*

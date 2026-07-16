@@ -23,6 +23,61 @@ async def on_message(message: discord.Message):
     pass
 
 
+async def reconnect_24_7(guild_id: int, channel: discord.VoiceChannel):
+    """
+    Reconnects the bot to its voice channel after an unexpected disconnect
+    while 24/7 mode is active, then resumes playback (or idles) as appropriate.
+    """
+    state = get_guild_state(guild_id)
+
+    for attempt in range(1, 4):
+        await asyncio.sleep(5 * attempt)
+
+        # Don't fight a shutdown, and 24/7 may have been turned off
+        # (e.g., /stop or /24_7 off) in the meantime.
+        if bot.is_closed() or not state._24_7_mode:
+            return
+
+        # Re-fetch the player: it may have been replaced by a reset while we slept.
+        music_player = state.music_player
+
+        guild = channel.guild
+        if guild.voice_client and guild.voice_client.is_connected():
+            return  # Already reconnected by another code path.
+
+        try:
+            vc = await channel.connect()
+            music_player.voice_client = vc
+            logger.info(
+                f"[{guild_id}] 24/7 mode: successfully reconnected to '{channel.name}' (attempt {attempt})."
+            )
+
+            if music_player.current_info:
+                bot.loop.create_task(
+                    play_audio(
+                        guild_id,
+                        seek_time=music_player.start_time,
+                        is_a_loop=True,
+                    )
+                )
+            elif not music_player.queue.empty():
+                music_player.current_task = bot.loop.create_task(play_audio(guild_id))
+            elif not [m for m in channel.members if not m.bot]:
+                # Idle and alone: keep the connection alive.
+                music_player.silence_task = bot.loop.create_task(
+                    play_silence_loop(guild_id)
+                )
+            return
+        except Exception as e:
+            logger.error(
+                f"[{guild_id}] 24/7 reconnect attempt {attempt} failed: {e}"
+            )
+
+    logger.error(
+        f"[{guild_id}] 24/7 mode: giving up on reconnecting after 3 failed attempts."
+    )
+
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     """
@@ -34,14 +89,13 @@ async def on_voice_state_update(member, before, after):
     guild = member.guild
     vc = guild.voice_client
 
-    if not vc or not vc.channel:
-        return
-
     music_player = get_player(guild.id)
     guild_id = guild.id
 
     # --- BOT DISCONNECTION LOGIC (Critical Cleanup) ---
-    if member.id == bot.user.id and after.channel is None:
+    # Handled BEFORE the vc guard: when the bot is kicked/disconnected,
+    # guild.voice_client is often already None at this point.
+    if member.id == bot.user.id and after.channel is None and before.channel is not None:
         if music_player.is_reconnecting or music_player.is_cleaning:
             return
 
@@ -50,11 +104,20 @@ async def on_voice_state_update(member, before, after):
 
         if get_guild_state(guild_id)._24_7_mode:
             logger.warning(
-                f"Bot was disconnected from guild {guild_id}, but 24/7 mode is active. Preserving player state."
+                f"Bot was disconnected from guild {guild_id}, but 24/7 mode is active. Preserving state and reconnecting."
             )
+            # Freeze the playback position so we can resume where we left off.
+            if music_player.playback_started_at:
+                elapsed = time.time() - music_player.playback_started_at
+                music_player.start_time += elapsed * music_player.playback_speed
+                music_player.playback_started_at = None
+
             music_player.voice_client = None
             if music_player.current_task and not music_player.current_task.done():
                 music_player.current_task.cancel()
+
+            # 24/7 means the bot should stay in the channel: reconnect automatically.
+            bot.loop.create_task(reconnect_24_7(guild_id, before.channel))
             return
 
         logger.info(
@@ -65,10 +128,13 @@ async def on_voice_state_update(member, before, after):
             music_player.current_task.cancel()
 
         state = get_guild_state(guild.id)
-        state.music_player = MusicPlayer()
+        state.reset_player()
         state.server_filters.clear()
         state._24_7_mode = False
         logger.info(f"Player for guild {guild.id} has been fully reset.")
+        return
+
+    if not vc or not vc.channel:
         return
 
     # --- HUMAN LEAVES / JOINS LOGIC ---
@@ -130,79 +196,6 @@ async def on_voice_state_update(member, before, after):
                     if vc.is_playing():
                         await safe_stop(vc)
                     await asyncio.sleep(0.1)
-
-                current_timestamp = music_player.start_time
-
-                if music_player.is_current_live:
-                    logger.info(
-                        f"Resuming a live stream for guild {guild_id}. Triggering resync."
-                    )
-                    music_player.is_resuming_live = True
-                    bot.loop.create_task(play_audio(guild_id, is_a_loop=True))
-                else:
-                    logger.info(
-                        f"Resuming track '{music_player.current_info.get('title')}' at {current_timestamp:.2f}s."
-                    )
-                    bot.loop.create_task(
-                        play_audio(
-                            guild_id, seek_time=current_timestamp, is_a_loop=True
-                        )
-                    )
-
-
-async def global_interaction_check(interaction: discord.Interaction) -> bool:
-    """
-    Final global check for slash commands.
-    Properly handles autocomplete interactions.
-    """
-    # If it's an autocomplete request, always allow it.
-    # The actual check will be performed during command submission.
-    if interaction.type == discord.InteractionType.autocomplete:
-        return True
-
-    # For all other interactions (command submission, buttons, etc.),
-    # apply our security logic.
-    if not interaction.guild:
-        return True
-
-    guild_id = interaction.guild.id
-    allowed_ids = get_guild_state(guild_id).allowed_channels
-
-    if not allowed_ids:
-        return True
-
-    if interaction.user.guild_permissions.manage_guild:
-        return True
-
-    if interaction.channel_id in allowed_ids:
-        return True
-
-    # Final block if no condition is met
-    state = get_guild_state(guild_id)
-    is_kawaii = state.locale == Locale.EN_X_KAWAII
-    channel_mentions = ", ".join([f"<#{ch_id}>" for ch_id in allowed_ids])
-    description_text = get_messages(
-        "command.restricted_description",
-        guild_id,
-        bot_name=interaction.client.user.name,
-    )
-
-    embed = discord.Embed(
-        title=get_messages("command.restricted_title", guild_id),
-        description=description_text,
-        color=0xFF9AA2 if is_kawaii else discord.Color.red(),
-    )
-    embed.add_field(
-        name=get_messages("command.allowed_channels_field", guild_id),
-        value=channel_mentions,
-    )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True, silent=True)
-    return False
-
-
-@bot.event
-async def on_ready():
 
                 current_timestamp = music_player.start_time
 

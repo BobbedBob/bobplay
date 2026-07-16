@@ -144,6 +144,7 @@ autoplay_toggle: "Autoplay is {state}."
 autoplay_state_enabled: "enabled"
 autoplay_state_disabled: "disabled"
 volume_success: "🔊 Volume adjusted to **{level}%**."
+default_volume_success: "🔊 Default volume set to **{level}%**. The bot will now start at this volume when joining a channel."
 play_next_added: "🎵 Added as next song"
 
 # ==============================================================================
@@ -194,6 +195,7 @@ queue:
   auto_desc: "Autoplay enabled! The bot will stay in the channel and add similar songs when the queue ends."
   normal_title: "🔁 24/7 Loop Mode"
   normal_desc: "Loop mode enabled! The bot will stay in the channel and loop the current queue indefinitely."
+  idle_desc: "24/7 mode enabled! The queue is empty, so the bot will simply stay in the channel and wait. Add songs with /play whenever you want."
   error:
     empty_queue_normal: "The queue is empty. Add songs before enabling 24/7 normal mode."
 

@@ -462,7 +462,7 @@ class MusicControllerView(View):
 
             # Fully reset the player state for the server
             clear_audio_cache(guild_id)
-            get_guild_state(guild_id).music_player = MusicPlayer()
+            get_guild_state(guild_id).reset_player()
             logger.info(
                 f"[{guild_id}] Player state fully reset via controller stop button."
             )

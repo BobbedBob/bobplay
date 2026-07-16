@@ -26,6 +26,7 @@ Playify uses Discord's native slash commands. Type `/` in your server to see the
 | `/seek` | Interactive seek, fast-forward, or rewind menu. |
 | `/jumpto` | Opens a menu to jump to a specific song in the queue. |
 | `/volume` | Adjusts the music volume for everyone (0-200%). |
+| `/defaultvolume` | Sets the default volume the bot starts at when joining a channel (0-200%, saved per server). |
 | `/reconnect` | Refresh the voice connection without losing your place. |
 
 ## Queue & info
@@ -44,7 +45,7 @@ Playify uses Discord's native slash commands. Type `/` in your server to see the
 | Command | Description |
 | :--- | :--- |
 | `/autoplay` | Enable/disable autoplay of similar songs. |
-| `/24_7 <mode>` | Enable or disable 24/7 mode (`normal`, `auto`, `off`). |
+| `/24_7 <mode>` | Enable or disable 24/7 mode (`normal`, `auto`, `off`). The bot stays in the voice channel permanently — even with an empty queue — and reconnects automatically if it gets disconnected. |
 | `/filter` | Applies or removes audio filters in real time. |
 | `/lyrics` | Get song lyrics from Genius. |
 | `/karaoke` | Start a synced karaoke-style lyrics display. |

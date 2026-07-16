@@ -73,9 +73,19 @@ def init_db():
         controller_message_id INTEGER,
         is_24_7 BOOLEAN NOT NULL DEFAULT 0,
         autoplay BOOLEAN NOT NULL DEFAULT 0,
-        volume REAL NOT NULL DEFAULT 1.0
+        volume REAL NOT NULL DEFAULT 1.0,
+        default_volume REAL NOT NULL DEFAULT 1.0
     )"""
     )
+
+    # Migration: add the default_volume column to databases created before it existed.
+    cursor.execute("PRAGMA table_info(guild_settings)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    if "default_volume" not in existing_columns:
+        cursor.execute(
+            "ALTER TABLE guild_settings ADD COLUMN default_volume REAL NOT NULL DEFAULT 1.0"
+        )
+        logger.info("Migrated guild_settings: added the default_volume column.")
 
     # Table for the list of allowed channels
     cursor.execute(
@@ -291,7 +301,7 @@ bot = PlayifyBot(command_prefix="!", intents=intents)
 
 
 class MusicPlayer:
-    def __init__(self):
+    def __init__(self, initial_volume: float = 1.0):
         self.voice_client = None
         self.current_task = None
         self.queue = asyncio.Queue()
@@ -331,7 +341,7 @@ class MusicPlayer:
         self.silence_task = None
         self.is_playing_silence = False
         self.is_resuming_after_silence = False
-        self.volume = 1.0
+        self.volume = initial_volume
         self.controller_message_id = None
         self.duration_hydration_lock = asyncio.Lock()
         self.queue_lock = asyncio.Lock()
@@ -385,7 +395,8 @@ class GuildModel:
 
     def __init__(self, guild_id: int):
         self.guild_id: int = guild_id
-        self.music_player: MusicPlayer = MusicPlayer()
+        self.default_volume: float = 1.0
+        self.music_player: MusicPlayer = MusicPlayer(initial_volume=self.default_volume)
         self.locale: Locale = Locale.EN_US
         self.server_filters: set[str] = set()
         self.karaoke_disclaimer_shown: bool = False
@@ -393,6 +404,11 @@ class GuildModel:
         self.allowed_channels: set[int] = set()
         self.controller_channel_id: int | None = None
         self.controller_message_id: int | None = None
+
+    def reset_player(self) -> MusicPlayer:
+        """Replaces the music player with a fresh one seeded with the server's default volume."""
+        self.music_player = MusicPlayer(initial_volume=self.default_volume)
+        return self.music_player
 
 
 # Main dictionary that will store the state of all guilds
@@ -420,10 +436,43 @@ def get_mode(guild_id: int) -> bool:
 # --- Core Music Player Class ---
 
 
+def _clean_track_for_db(track):
+    """
+    Returns a JSON-serializable copy of a track (current song, queue, history,
+    or radio playlist item). Tracks carry live Discord objects (the `requester`
+    Member) and can be LazySearchItem instances — neither survives json.dumps.
+    The requester is intentionally dropped: on restore, play_audio falls back
+    to bot.user.
+    """
+    if not isinstance(track, dict):
+        # LazySearchItem (or anything unknown): persist it as a search query
+        # so it can still be resolved and played after a restart.
+        title = getattr(track, "title", "Unknown Title")
+        artist = getattr(track, "artist", "") or ""
+        search_prefix = "scsearch:" if IS_PUBLIC_VERSION else "ytsearch:"
+        return {
+            "url": f"{search_prefix}{title} {artist}".strip(),
+            "title": title,
+            "is_single": True,
+        }
+
+    safe = {}
+    for key, value in track.items():
+        try:
+            json.dumps(value)
+        except TypeError:
+            continue
+        safe[key] = value
+    return safe
+
+
+_save_states_lock = asyncio.Lock()
+
+
 async def save_all_states():
     """Save the complete state of all servers in the database."""
     logger.info("Attempting to save the state of all servers...")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with _save_states_lock, aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM guild_settings")
         await db.execute("DELETE FROM allowlist")
         await db.execute("DELETE FROM playback_state")
@@ -438,9 +487,10 @@ async def save_all_states():
                 state._24_7_mode,
                 player.autoplay_enabled,
                 player.volume,
+                state.default_volume,
             )
             await db.execute(
-                "INSERT INTO guild_settings VALUES (?, ?, ?, ?, ?, ?, ?)", settings
+                "INSERT INTO guild_settings VALUES (?, ?, ?, ?, ?, ?, ?, ?)", settings
             )
 
             for channel_id in state.allowed_channels:
@@ -463,10 +513,16 @@ async def save_all_states():
             state_data = (
                 guild_id,
                 player.voice_client.channel.id,
-                json.dumps(player.current_info) if player.current_info else None,
-                json.dumps(list(player.queue._queue)) if not player.queue.empty() else None,
-                json.dumps(player.history),
-                json.dumps(player.radio_playlist),
+                json.dumps(_clean_track_for_db(player.current_info))
+                if player.current_info
+                else None,
+                json.dumps(
+                    [_clean_track_for_db(t) for t in player.queue._queue]
+                )
+                if not player.queue.empty()
+                else None,
+                json.dumps([_clean_track_for_db(t) for t in player.history]),
+                json.dumps([_clean_track_for_db(t) for t in player.radio_playlist]),
                 player.loop_current,
                 timestamp,
             )
@@ -498,6 +554,10 @@ async def load_states_on_startup():
                 state._24_7_mode = row["is_24_7"]
                 player.autoplay_enabled = row["autoplay"]
                 player.volume = row["volume"]
+                try:
+                    state.default_volume = row["default_volume"]
+                except (IndexError, KeyError):
+                    state.default_volume = 1.0
 
         async with db.execute("SELECT * FROM allowlist") as cursor:
             async for row in cursor:
@@ -533,7 +593,9 @@ async def load_states_on_startup():
                     for item in queue_items:
                         await player.queue.put(item)
 
-                    if row["voice_channel_id"] and player.current_info:
+                    if row["voice_channel_id"] and (
+                        player.current_info or state._24_7_mode
+                    ):
                         channel = guild.get_channel(row["voice_channel_id"])
                         if channel and isinstance(channel, discord.VoiceChannel):
                             logger.info(
@@ -546,10 +608,22 @@ async def load_states_on_startup():
                             )
                             player.text_channel = bot.get_channel(text_channel_id)
 
-                            timestamp = row["playback_timestamp"]
-                            bot.loop.create_task(
-                                play_audio(guild_id, seek_time=timestamp, is_a_loop=True)
-                            )
+                            if player.current_info:
+                                timestamp = row["playback_timestamp"]
+                                bot.loop.create_task(
+                                    play_audio(guild_id, seek_time=timestamp, is_a_loop=True)
+                                )
+                            elif not player.queue.empty():
+                                player.current_task = bot.loop.create_task(
+                                    play_audio(guild_id)
+                                )
+                            elif not [m for m in channel.members if not m.bot]:
+                                # 24/7 idle and alone: keep the connection alive.
+                                from .services.voice import play_silence_loop
+
+                                player.silence_task = bot.loop.create_task(
+                                    play_silence_loop(guild_id)
+                                )
                 except Exception as e:
                     logger.error(f"Failed to restore state for server {guild_id}: {e}")
 

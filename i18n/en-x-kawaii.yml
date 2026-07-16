@@ -144,6 +144,7 @@ autoplay_toggle: "Autoplay is {state} (◕‿◕✿)"
 autoplay_state_enabled: "enabled"
 autoplay_state_disabled: "disabled"
 volume_success: "Volume set to **{level}%**!~ (ﾉ◕ヮ◕)ﾉ*:･ﾟ✧"
+default_volume_success: "Default volume is now **{level}%**!~ I'll always start at this volume when I join~ ♪(´▽｀)"
 play_next_added: "(っ◕‿◕)っ Added as next song"
 
 # ==============================================================================
@@ -194,6 +195,7 @@ queue:
   auto_desc: "Autoplay on! New similar songs will appear magically when the queue ends~"
   normal_title: "24/7 Loop Mode (o･ω･o)"
   normal_desc: "Playlist looping forever~ No new songs added! I'll just keep playing these for you~"
+  idle_desc: "24/7 mode on! The queue is empty so I'll just chill here and wait for you~ Add songs with /play anytime! (￣o￣) zzZ"
   error:
     empty_queue_normal: "The queue is empty! Add some songs before we loop forever~ (´• ω •`)"
 
