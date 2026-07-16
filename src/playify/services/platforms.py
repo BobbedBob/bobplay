@@ -96,9 +96,12 @@ async def process_spotify_url(url, interaction):
             loop = asyncio.get_event_loop()
 
             if "playlist" in clean_url:
+                # max_tracks=None fetches ALL tracks (the default stops at 100).
                 data = await loop.run_in_executor(
                     None,
-                    lambda: spotify_scraper_client.get_playlist(clean_url).to_dict(),
+                    lambda: spotify_scraper_client.get_playlist(
+                        clean_url, max_tracks=None
+                    ).to_dict(),
                 )
                 for item in data.get("tracks", []):
                     track = item.get("track")
